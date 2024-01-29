@@ -17,6 +17,7 @@
 
 const std::string k_workspaceCount = "plugin:split-monitor-workspaces:count";
 const std::string k_keepFocused = "plugin:split-monitor-workspaces:keep_focused";
+const std::string k_moveToLastPluggedMonitor = "plugin:split-monitor-workspaces:move_to_last_plugged_monitor";
 const CColor s_pluginColor = {0x61 / 255.0f, 0xAF / 255.0f, 0xEF / 255.0f, 1.0f};
 
 std::map<uint64_t, std::vector<std::string>> g_vMonitorWorkspaceMap;
@@ -149,8 +150,62 @@ void mapWorkspacesToMonitors()
     }
 }
 
-void refreshMapping(void*, SCallbackInfo&, std::any)
+void handleMonitorAdded(void*, SCallbackInfo&, std::any)
 {
+    mapWorkspacesToMonitors();
+}
+
+void handleMonitorRemoved(void*, SCallbackInfo&, std::any monitor)
+{
+    CMonitor* unpluggedMonitor = std::any_cast<CMonitor*>(monitor);
+
+    uint64_t unpluggedMonitorID = unpluggedMonitor->ID;
+
+    uint64_t monitorCount = g_pCompositor->m_vMonitors.size();
+    int workspaceCount = g_pConfigManager->getConfigValuePtrSafe(k_workspaceCount)->intValue;
+
+    int lastValidWorkspace = monitorCount * workspaceCount;
+
+    bool targetLastPlugged = g_pConfigManager->getConfigValuePtrSafe(k_moveToLastPluggedMonitor)->intValue == 1;
+
+    int targetMonitorID = targetLastPlugged ? g_pCompositor->m_vMonitors.back()->ID : 0;
+
+    CMonitor* targetMonitor = g_pCompositor->getMonitorFromID(targetMonitorID);
+
+    if (targetMonitor == nullptr) {
+        Debug::log(WARN, "[split-monitor-workspaces]: Could not find target monitor by id");
+        return;
+    }
+
+    for (auto& window : g_pCompositor->m_vWindows) {
+        CWorkspace* workspace = g_pCompositor->getWorkspaceByID(window->m_iWorkspaceID);
+
+        if (workspace == nullptr) {
+            Debug::log(WARN, "[split-monitor-workspaces]: Could not find workspace by id");
+            break;
+        }
+
+        int windowWorkspace = workspace->m_iMonitorID;
+
+        if (windowWorkspace == unpluggedMonitorID) {
+            int workspaceIndex = ((windowWorkspace + workspaceCount - 1) % workspaceCount) + 1;
+
+            int workspaceID = targetMonitorID * workspaceCount + workspaceIndex;
+
+            CWorkspace* targetWorskpace = g_pCompositor->getWorkspaceByID(workspaceID);
+
+            if (targetWorskpace == nullptr) {
+                // create the workspace if it doesn't exist (this seems to be
+                // async and delays the actual creation of a workspace, cauing
+                // the targetWorskpace to be a null pointer)
+                HyprlandAPI::invokeHyprctlCommand("keyword", "workspace " + std::to_string(workspaceID) + "," + targetMonitor->szName);
+                targetWorskpace = g_pCompositor->getWorkspaceByID(workspaceID);
+            }
+
+            g_pCompositor->moveWindowToWorkspaceSafe(window.get(), targetWorskpace);
+        }
+    }
+
     mapWorkspacesToMonitors();
 }
 
@@ -166,6 +221,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
 
     HyprlandAPI::addConfigValue(PHANDLE, k_workspaceCount, SConfigValue{.intValue = 10});
     HyprlandAPI::addConfigValue(PHANDLE, k_keepFocused, SConfigValue{.intValue = 0});
+    HyprlandAPI::addConfigValue(PHANDLE, k_moveToLastPluggedMonitor, SConfigValue{.intValue = 0});
 
     HyprlandAPI::addDispatcher(PHANDLE, "split-workspace", splitWorkspace);
     HyprlandAPI::addDispatcher(PHANDLE, "split-movetoworkspace", splitMoveToWorkspace);
@@ -179,8 +235,8 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
 
     HyprlandAPI::addNotification(PHANDLE, "[split-monitor-workspaces] Initialized successfully!", s_pluginColor, 5000);
 
-    e_monitorAddedHandle = HyprlandAPI::registerCallbackDynamic(PHANDLE, "monitorAdded", refreshMapping);
-    e_monitorRemovedHandle = HyprlandAPI::registerCallbackDynamic(PHANDLE, "monitorRemoved", refreshMapping);
+    e_monitorAddedHandle = HyprlandAPI::registerCallbackDynamic(PHANDLE, "monitorAdded", handleMonitorAdded);
+    e_monitorRemovedHandle = HyprlandAPI::registerCallbackDynamic(PHANDLE, "monitorRemoved", handleMonitorRemoved);
 
     return {"split-monitor-workspaces", "Split monitor workspace namespaces", "Duckonaut", "1.1.0"};
 }
